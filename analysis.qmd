@@ -11,3 +11,117 @@ execute:
 library(tidyverse)
 library(arrow)
 ```
+
+```{r}
+arrow::open_dataset("data/daily_prices.parquet")$schema
+```
+
+```{r}
+arrow::open_dataset("data/daily_prices.parquet") |>
+  dplyr::collect() |>
+  dplyr::slice_sample(n = 10)
+```
+
+```{r}
+arrow::open_dataset("data/daily_prices.parquet") |>
+  dplyr::filter(date_raw >= "2025-01-01") |>
+  dplyr::group_by(coin_id) |>
+  dplyr::summarise(avg_market_cap_usd = mean(market_cap_usd, na.rm = TRUE)) |>
+  dplyr::arrange(dplyr::desc(avg_market_cap_usd)) |>
+  dplyr::collect()
+```
+
+```{r}
+#| cache: true
+prices <- arrow::read_parquet("data/daily_prices.parquet")
+metadata <- arrow::read_parquet("data/coin_metadata.parquet")
+categories <- arrow::read_parquet("data/categories.parquet")
+
+crypto <- prices |>
+  dplyr::mutate(date = lubridate::ymd(date_raw)) |>
+  dplyr::left_join(metadata, by = "coin_id") |>
+  dplyr::left_join(
+    dplyr::rename(categories, category_description = description),
+    by = "category_id"
+  )
+```
+
+```{r}
+metadata <- metadata |>
+  dplyr::mutate(
+    launch_date_parsed = dplyr::coalesce(
+      lubridate::ymd(launch_date, quiet = TRUE),
+      lubridate::mdy(launch_date, quiet = TRUE)
+    )
+  )
+
+metadata |>
+  dplyr::arrange(launch_date_parsed) |>
+  dplyr::select(coin_id, coin_name, launch_date, launch_date_parsed) |>
+  print(n = Inf)
+```
+
+```{r}
+prices |>
+  dplyr::filter(coin_id == "btc") |>
+  dplyr::mutate(date = lubridate::ymd(date_raw)) |>
+  ggplot2::ggplot(ggplot2::aes(x = date, y = price_usd)) +
+  ggplot2::geom_line()
+```
+
+```{r}
+crypto |>
+  dplyr::mutate(category_name = tidyr::replace_na(category_name, "Unknown")) |>
+  dplyr::group_by(date, category_name) |>
+  dplyr::summarise(market_cap_usd = sum(market_cap_usd, na.rm = TRUE), .groups = "drop") |>
+  dplyr::group_by(date) |>
+  dplyr::mutate(share = market_cap_usd / sum(market_cap_usd)) |>
+  dplyr::ungroup() |>
+  dplyr::mutate(
+    category_name = forcats::fct_reorder(category_name, share, .fun = mean, .desc = TRUE)
+  ) |>
+  ggplot2::ggplot(ggplot2::aes(x = date, y = share, fill = category_name)) +
+  ggplot2::geom_area() +
+  ggplot2::geom_rect(
+    data = tibble::tibble(
+      start = lubridate::ymd(c("2022-05-07", "2022-11-08")),
+      end = lubridate::ymd(c("2022-05-12", "2022-11-11"))
+    ),
+    ggplot2::aes(xmin = start, xmax = end, ymin = 0, ymax = 1),
+    inherit.aes = FALSE,
+    fill = "grey20",
+    alpha = 0.2,
+    show.legend = FALSE
+  ) +
+  ggplot2::geom_vline(
+    xintercept = as.numeric(lubridate::ymd(c("2022-05-07", "2022-05-12", "2022-11-08", "2022-11-11"))),
+    color = "grey20",
+    linetype = "dashed",
+    linewidth = 0.4,
+    show.legend = FALSE
+  ) +
+  ggplot2::annotate(
+    "label",
+    x = lubridate::ymd(c("2022-05-09", "2022-11-09")),
+    y = c(0.94, 0.8),
+    label = c("Luna/UST crash\nMay 7-12, 2022", "FTX collapse\nNov 8-11, 2022"),
+    size = 3,
+    label.size = 0,
+    fill = "white"
+  ) +
+  ggplot2::scale_fill_viridis_d(option = "C") +
+  ggplot2::scale_y_continuous(labels = scales::label_percent(), expand = c(0, 0)) +
+  ggplot2::labs(
+    title = "Crypto market-cap share by category",
+    subtitle = stringr::str_wrap(
+      "Each band's share of total market cap across tracked coins; daily shares sum to 100%.",
+      width = 75
+    ),
+    x = "Date",
+    y = "Share of total market cap",
+    fill = "Category",
+    caption = "Source: daily_prices.parquet, coin_metadata.parquet, and categories.parquet."
+  ) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(legend.position = "bottom")
+```
